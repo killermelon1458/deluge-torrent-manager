@@ -1,30 +1,168 @@
-from pathlib import Path
+# Deluge Torrent Manager Setup (Virtualenv + VPN + Automation)
 
-# Markdown content for the deluge-vpn-setup.md file
-markdown_content = """
-# Deluge VPN Setup on Headless Linux (Virtualenv + Systemd + UFW)
+This project documents the full setup of a **headless, secure, Deluge torrent box** running on a Linux server (e.g., Raspberry Pi), using:
 
-This document outlines the complete setup of a secure Deluge torrent box running on a headless Linux system. The configuration includes:
-
-- Python virtual environment
-- Deluge daemon autostart via systemd user service
-- Firewall (UFW) configuration for VPN
-- Cron jobs for torrent health/error handling
-- Logging and auto-recovery
+* ✅ Deluge Daemon in a Python `virtualenv`
+* 🔐 VPN via `tun0` interface (e.g., Surfshark OpenVPN)
+* 🔁 Systemd-based autostart
+* ⚙️ Error recovery automation (`deluge_log_errors.py`)
+* 📂 Automated torrent management (`deluge_torrent_manager.py`)
+* 🔒 UFW firewall with tight VPN-only egress
+* 🧠 This README is written to give LLMs and humans full context for future debugging or feature development
 
 ---
 
-## 🧰 Environment Summary
+## 🖥️ System Overview
 
-| Component       | Description                      |
-|----------------|----------------------------------|
-| OS             | Headless Linux (User: `torbox`)  |
-| VPN            | tun0 interface (e.g. Surfshark)  |
-| Deluge Version | 2.2.0 (via virtualenv)           |
-| Libtorrent     | 2.0.11.0                         |
-| Python         | 3.10 (virtualenv)                |
+**User:** `torbox`
+**OS:** Linux (Debian-based)
+**Python:** 3.10 (via `virtualenv`)
+**VPN:** OpenVPN via `tun0`, static IP from provider
+**Deluge version:** Latest from `pip`
+**Libtorrent:** v2.0.11.0 (built from source)
 
 ---
 
-## 🗃️ File Structure
+## 📁 File Structure
 
+```
+~/deluge_project_repo/
+├── deluge_log_errors.py       # Monitors Deluge for errors & tries to auto-fix
+├── deluge_torrent_manager.py # Controls active/queued torrent states
+├── README.md                  # You're here
+```
+
+---
+
+## 🚀 Setup Instructions
+
+### 1. Clone the Repo and Create the Virtualenv
+
+```bash
+sudo apt update && sudo apt install python3.10-venv python3-pip build-essential libboost-python-dev libtorrent-rasterbar-dev git
+
+python3.10 -m venv ~/deluge-venv-310
+source ~/deluge-venv-310/bin/activate
+
+pip install wheel setuptools deluge deluge-client
+```
+
+### 2. Build `libtorrent` from Source (if needed)
+
+```bash
+git clone https://github.com/arvidn/libtorrent
+cd libtorrent
+python3.10 setup.py build
+python3.10 setup.py install
+```
+
+Check version:
+
+```bash
+python -c "import libtorrent as lt; print('libtorrent version:', lt.version)"
+```
+
+### 3. Launch `deluged` in the venv
+
+```bash
+source ~/deluge-venv-310/bin/activate
+~/.config/systemd/user/deluged.service → points to correct venv path
+systemctl --user daemon-reload
+systemctl --user enable --now deluged
+loginctl enable-linger torbox  # Important for user services
+```
+
+### 4. Set up Firewall (UFW)
+
+```bash
+sudo ufw default deny incoming
+sudo ufw default deny outgoing
+
+# Allow VPN and local LAN
+sudo ufw allow out on tun0
+sudo ufw allow in on tun0
+sudo ufw allow out 53,1194/udp  # DNS + VPN
+sudo ufw allow out to 192.168.1.0/24  # Local access
+sudo ufw allow in from 192.168.1.0/24
+
+# Deluge
+sudo ufw allow in 58846/tcp
+sudo ufw allow in 8112/tcp
+```
+
+---
+
+## 🔧 Crontab Jobs
+
+```bash
+# Run the log monitor and error recovery script every 5 min
+*/5 * * * * /home/torbox/deluge-venv-310/bin/python /home/torbox/deluge_project_repo/deluge_log_errors.py >/dev/null 2>&1
+
+# Run the torrent queue manager (flock prevents overlap)
+*/5 * * * * /usr/bin/flock -n /home/torbox/.cache/deluge_torrent_manager.lock \
+  /home/torbox/deluge-venv-310/bin/python /home/torbox/deluge_project_repo/deluge_torrent_manager.py >/dev/null 2>&1
+```
+
+---
+
+## 📜 Summary of Custom Scripts
+
+### `deluge_log_errors.py`
+
+* Connects to Deluge via `deluge-client`
+* Logs any torrents in `Error` state
+* Automatically resumes or rechecks based on message content
+* Triggers rechecks if resume fails (e.g., for 'bad address' or 'resume data' issues)
+* Removes completed torrents based on config
+
+### `deluge_torrent_manager.py`
+
+* Ensures a fixed number of downloads run at once
+* Queues or resumes torrents intelligently
+* Meant to keep the system operating smoothly and prevent overload
+
+---
+
+## 🔐 Credentials & Security
+
+* The real Deluge password has been **removed** from public scripts
+* Replace `DELUGE_PASS` in your scripts with the actual localclient password from `~/.config/deluge/auth`
+* Recommend rotating this password and storing securely if uploading to GitHub
+
+---
+
+## 🧠 Notes for LLMs & Future Developers
+
+This setup:
+
+* Uses `virtualenv` isolation to avoid system Python issues
+* Is intended for headless systems (no GUI)
+* Has automated log and torrent state management via Python scripts + cron
+* Uses a strict UFW firewall to ensure only VPN traffic is allowed outbound
+* Should not leak your real IP — tested using torrent-based IP leak trackers
+
+To diagnose problems:
+
+* Use `systemctl --user status deluged` to check the daemon
+* Use `journalctl --user -u deluged` for logs
+* Check `~/deluge_logs/` for error logs generated by the Python scripts
+* Use `deluge-console` inside the virtualenv for quick torrent inspection
+
+---
+
+## 📬 Contact
+
+This project was built for personal home use, but you're welcome to fork it. Questions or improvements welcome!
+
+This whole project was done using chatGPT. 
+
+---
+
+## 🏁 Example Future Tasks
+
+* [ ] Add healthcheck webhook (Pushover / email alerts)
+* [ ] Add support for categories / labels
+* [ ] Add smart seeding time before removal
+* [ ] Improve tracker error parsing and fallback logic
+
+---
